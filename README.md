@@ -6,7 +6,7 @@
 
 ## Overview
 
-PhishPrint... wait, wrong project. This system monitors metro coach crowding in real time using a **dual-sensor fusion approach**:
+This system monitors metro coach crowding in real time using a **dual-sensor fusion approach**:
 
 -  **Weight-based counting** via load cell + HX711 on an ESP32 DevKit V1
 -  **Vision-based counting** via ESP32-CAM + YOLOv8n person detection
