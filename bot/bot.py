@@ -7,7 +7,7 @@ import time
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime, timedelta
-
+import sqlite3
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -22,6 +22,27 @@ TABLE = MODEL['table']
 STATIONS = MODEL['stations']
 LIVE = {'grams': None, 'ts': 0.0}
 FULL = 5000.0
+DB_PATH = 'data/live.db'
+
+
+def init_db():
+    with sqlite3.connect(DB_PATH) as con:
+        con.execute("""CREATE TABLE IF NOT EXISTS readings(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT NOT NULL,
+        grams REAL NOT NULL,
+        percent REAL NOT NULL)""")
+def log_reading(grams: float):
+    pct = max(0.0, min(1.0, grams / FULL))
+    con = sqlite3.connect(DB_PATH)
+    try:
+        con.execute('INSERT INTO readings (ts, grams, percent) VALUES (?, ?, ?)',
+                    (datetime.now().isoformat(timespec='seconds'), grams, pct))
+        con.commit()
+    finally:
+        con.close()
+
+
 STALE_SECOND = 15
 PORT = 5000
 
@@ -35,6 +56,12 @@ class Receiver(BaseHTTPRequestHandler):
             self.send_response(200)
         except Exception:
             self.send_response(400)
+            self.end_headers()
+            return
+        try:
+            log_reading(LIVE['grams'])
+        except Exception as e:
+            print('DB log failed - ', e)
         self.end_headers()
 
     def log_message(self, *args):
@@ -171,9 +198,10 @@ def main():
     app.add_handler(CommandHandler('help', help_cmd))
     app.add_handler(CommandHandler('crowd', crowd))
     app.add_handler(CommandHandler('now', now))
-    print('Bot running. Ctrl + C to kill. hehehehehe')
+    init_db()
     start_receiver()
     app.run_polling()
+    print('Bot running. Ctrl + C to kill. hehehehehe')
 
 if __name__ == '__main__':
     main()
