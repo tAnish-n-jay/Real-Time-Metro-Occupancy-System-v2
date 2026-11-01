@@ -2,6 +2,10 @@ import os
 import pickle
 import re
 import difflib
+import json 
+import time
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
@@ -16,7 +20,36 @@ with open('models/crowd_model.pkl', 'rb') as f:
 
 TABLE = MODEL['table']
 STATIONS = MODEL['stations']
+LIVE = {'grams': None, 'ts': 0.0}
+FULL = 5000.0
+STALE_SECOND = 15
+PORT = 5000
 
+class Receiver(BaseHTTPRequestHandler):
+    def do_POST(self):
+        try:
+            n = int(self.headers.get('Content-Length', 0))
+            data = json.loads(self.rfile.read(n))
+            LIVE["grams"] = float(data['grams'])
+            LIVE['ts'] = time.time()
+            self.send_response(200)
+        except Exception:
+            self.send_response(400)
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+def start_receiver():
+    server = HTTPServer(('0.0.0.0', PORT), Receiver)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    print(f'Receiver listening on port {PORT}')
+
+def live_text() -> str:
+    if LIVE['grams'] is None or time.time() - LIVE['ts'] > STALE_SECOND:
+        return 'Prototype coach: offline (no recent reading).'
+    pct = max(0.0, min(1.0, LIVE["grams"] / FULL))
+    return f"Prototype coach (live): {pct:.0%} ({level(pct)}), {LIVE['grams']:.0f} g on the platform"
 DAYS = {
     'mon': ('weekday', 'Monday'), 'monday': ('weekday', 'Monday'),
     "tue": ("weekday", "Tuesday"), "tues": ("weekday", "Tuesday"), "tuesday": ("weekday", "Tuesday"),
@@ -125,12 +158,13 @@ async def crowd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(answer(" ".join(args[:-2]), day[0], day[1], hour))
 
 async def now(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text('Usage: /now <station>\nExample: /now majestic')
-        return 
-    d = datetime.now()
-    await update.message.reply_text(answer(" ".join(context.args), day_type_of(d), d.strftime('%A'), d.hour))
-
+    parts = [live_text()]
+    if context.args:
+        d = datetime.now()
+        parts.append(answer(" ".join(context.args), day_type_of(d), d.strftime('%A'), d.hour))
+    else:
+        parts.append("Add a station for the predicted crowd, e.g. /now pattanagere")
+    await update.message.reply_text("\n\n".join(parts))
 def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler('start', start))
@@ -138,6 +172,7 @@ def main():
     app.add_handler(CommandHandler('crowd', crowd))
     app.add_handler(CommandHandler('now', now))
     print('Bot running. Ctrl + C to kill. hehehehehe')
+    start_receiver()
     app.run_polling()
 
 if __name__ == '__main__':
