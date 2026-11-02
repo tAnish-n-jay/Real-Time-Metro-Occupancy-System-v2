@@ -21,7 +21,8 @@ with open('models/crowd_model.pkl', 'rb') as f:
 TABLE = MODEL['table']
 STATIONS = MODEL['stations']
 LIVE = {'grams': None, 'ts': 0.0}
-FULL = 5000.0
+FULL = 1500.0
+DEMO_STATION = 'Pattanagere'
 DB_PATH = 'data/live.db'
 
 
@@ -156,11 +157,11 @@ def answer(station_query: str, day_type: str, day_label: str, hour: int) -> str:
     note = '\n(little to no ridership at this hour)' if c == 0 else ""
     return (f'{st}\n{day_label}, {hour_str(hour)}\n'
             f"Crowd level: {c:.0%} ({level(c)}) {note}\n\n"
-            "Predicted from historical data, relative to this station's busy level")
+            "Predicted from historical data, relative to this station's busy level. It is not based on the live count.")
 
 HELP = ("Commands:\n"
         "/crowd <station> <day> <time> e.g. /crowd majestic mon 9am\n"
-        "/now <station> typical crowd for this day and hour\n"
+        "/now <station> live prototype reading + typical crowd for this day and hour\n"
         "Days: mon..sun, weekday, today, tomorrow\n"
         "Time: 9, 9am, 6pm, 23:00")
 
@@ -177,7 +178,7 @@ async def crowd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return 
     hour, day = parse_hour(args[-1]), parse_day(args[-2])
     if hour is None:
-        await update.message.reply_text(f"Try again! '{args[-1]}'. Try 9, 9am, 9pm or 21:00.'")
+        await update.message.reply_text(f"Try again! '{args[-1]}'. Try 9, 9am, 9pm or 21:00.")
         return 
     if day is None:
         await update.message.reply_text(f'Try again! "{args[-2]}". Try mon..sun, weekday, today or tomorrow.')
@@ -185,23 +186,30 @@ async def crowd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(answer(" ".join(args[:-2]), day[0], day[1], hour))
 
 async def now(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    parts = [live_text()]
-    if context.args:
-        d = datetime.now()
-        parts.append(answer(" ".join(context.args), day_type_of(d), d.strftime('%A'), d.hour))
-    else:
-        parts.append("Add a station for the predicted crowd, e.g. /now pattanagere")
-    await update.message.reply_text("\n\n".join(parts))
+    d = datetime.now()
+    if not context.args:
+        await update.message.reply_text(
+            live_text() + "\nAdd a station to see the predicted crowd, e.g, /now pattanagere.")
+        return 
+    query = " ".join(context.args)
+    matches = find_station(query)
+    parts = []
+    if len(matches) == 1 and matches[0] == DEMO_STATION:
+        parts.append(live_text())
+    parts.append(answer(query, day_type_of(d), d.strftime('%A'), d.hour))
+    if len(matches) == 1 and matches[0] != DEMO_STATION:
+        parts.append(f'(Live prototype coach is only at {DEMO_STATION.split(',')[-1].strip()}.)')
+    await update.message.reply_text('\n\n'.join(parts))
 def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('help', help_cmd))
     app.add_handler(CommandHandler('crowd', crowd))
     app.add_handler(CommandHandler('now', now))
+    print('Bot running. Ctrl + C to kill. hehehehehe')
     init_db()
     start_receiver()
     app.run_polling()
-    print('Bot running. Ctrl + C to kill. hehehehehe')
 
 if __name__ == '__main__':
     main()
