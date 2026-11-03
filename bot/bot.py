@@ -11,7 +11,7 @@ import sqlite3
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-
+from functools import wraps
 load_dotenv()
 TOKEN = os.getenv('TELEGRAM_TOKEN')
 
@@ -23,6 +23,20 @@ STATIONS = MODEL['stations']
 LIVE = {'grams': None, 'ts': 0.0}
 FULL = 1500.0
 DEMO_STATION = 'Pattanagere'
+ADMIN_IDS = set(
+    int(x.strip())
+    for x in os.getenv("ADMIN_IDS", "").split(",")
+    if x.strip()
+)
+
+def admin_only(func):
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if update.effective_user.id not in ADMIN_IDS:
+            await update.message.reply_text("You are not authorised to use this command.")
+            return
+        return await func(update, context)
+    return wrapper
 DB_PATH = 'data/live.db'
 
 
@@ -160,8 +174,13 @@ def answer(station_query: str, day_type: str, day_label: str, hour: int) -> str:
             "Predicted from historical data, relative to this station's busy level. It is not based on the live count.")
 
 HELP = ("Commands:\n"
-        "/crowd <station> <day> <time> e.g. /crowd majestic mon 9am\n"
-        "/now <station> live prototype reading + typical crowd for this day and hour\n"
+        "/crowd <station> <day> <time>  e.g. /crowd majestic mon 9am\n"
+        "/now <station>  live prototype reading + typical crowd\n"
+        "/whoami  your Telegram user ID\n\n"
+        "Admin only:\n"
+        "/status  prototype health and DB info\n"
+        "/stats  load summary by day type\n"
+        "/history  chart of the last 60 readings\n\n"
         "Days: mon..sun, weekday, today, tomorrow\n"
         "Time: 9, 9am, 6pm, 23:00")
 
@@ -200,12 +219,117 @@ async def now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(matches) == 1 and matches[0] != DEMO_STATION:
         parts.append(f'(Live prototype coach is only at {DEMO_STATION.split(',')[-1].strip()}.)')
     await update.message.reply_text('\n\n'.join(parts))
+async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    u = update.effective_user
+    await update.message.reply_text(
+        f"Your Telegram user ID: `{u.id}`\nName: {u.full_name}",
+        parse_mode="Markdown"
+    )
+
+@admin_only
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    age = time.time() - LIVE['ts']
+    if LIVE['grams'] is None or age > STALE_SECOND:
+        proto = 'Prototype: offline'
+    else:
+        pct = max(0,0, min(1.0, LIVE['grams'] / FULL))
+        proto = (f"Prototype: online\n",
+                 f"Last reading: {LIVE['grams']:.0f} f ({pct:.0%})\n"
+                 f"{age:.0f} s ago")
+        con = sqlite3.connect(DB_PATH)
+        row = con.execute(
+            "SELECT COUNT(*), MIN(ts), MAX(ts) FROM readings").fetchone()
+        con.close()
+        db = (f"DB: {row[0]} readings\n"
+              f"First: {row[1]}\nLast: {row[2]}" if row[0] else "DB: empty")
+        await update.message.reply_text(f'{proto}\n\n{db}')
+@admin_only
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    con = sqlite3.connect(DB_PATH)
+    rows = con.execute(
+        "SELECT ts, grams, percent FROM readings ORDER BY ts"
+    ).fetchall()
+    con.close()
+    if not rows:
+        await update.message.reply_text("No readings in the database yet.")
+        return
+    import pandas as pd
+    df = pd.DataFrame(rows, columns=['ts', 'grams', 'percent'])
+    df['ts'] = pd.to_datetime(df['ts'])
+    df['hour'] = df['ts'].dt.hour
+    df['dow'] = df['ts'].dt.day_name()
+    df['day_type'] = df['ts'].dt.day_of_week.apply(
+        lambda d: "Weekday" if d < 5 else ("Saturday" if d == 5 else "Sunday"))
+    summary = df.groupby("day_type").agg(
+        avg_load=('percent', lambda x: f"{x.mean():.0%}"),
+        peak_load=('percent', lambda x: f"{x.max():.0%}"),
+        readings=("percent","count")
+    ).reindex(['Weekday', 'Saturday', 'Sunday'])
+    lines = ['**Prototype stats (pattanagere coach)*\n']
+    lines.append(f'{'Day type':<12} {'Avg':>6} {'Peak':>6} {'Reading':>9}')
+    lines.append('-'*40)
+    for day_type, row in summary.iterrows():
+        if pd.isna(row['readings']) or row['readings'] == 0:
+            lines.append(f'{day_type:<12} {'--':>6} {'--':>6}{'0':>9}')
+        else:
+            lines.append(
+                f"{day_type:<12} {row['avg_load']:>6} {row['peak_load']:>6} {int(row['readings']):>9}")
+    lines[0] = 'Prototype stats (Pattanagere coach)\n'
+    lines.append(f'\nTotal readings: {len(df)}')
+    lines.append(f'Period: {df['ts'].min().date()} to {df['ts'].max().date()}')
+    await update.message.reply_text("\n".join(lines))
+
+@admin_only
+async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    con = sqlite3.connect(DB_PATH)
+    rows = con.execute(
+        "SELECT ts, grams, percent FROM readings ORDER BY ts DESC LIMIT 60"
+    ).fetchall()
+    con.close()
+
+    if not rows:
+        await update.message.reply_text("No readings yet.")
+        return
+
+    import pandas as pd
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import io
+
+    df = pd.DataFrame(rows[::-1], columns=["ts", "grams", "percent"])
+    df["ts"] = pd.to_datetime(df["ts"])
+    df["pct"] = df["percent"] * 100
+
+    fig, ax = plt.subplots(figsize=(8, 3.5))
+    ax.plot(df['ts'], df['pct'], color='#5b8dee', linewidth=1.8)
+    ax.fill_between(df['ts'], df['pct'], alpha=0.15, color='#5b8dee')
+    ax.axhline(100, color='red', linestyle='--', linewidth=0.8, label= "Full (1500 g)")
+    ax.set_ylim(0, 110)
+    ax.set_ylabel('Coach load (%)')
+    ax.set_xlabel('Time')
+    ax.set_title("Pattanagere prototype - last 60 readings")
+    ax.legend(fontsize=8)
+    fig.autofmt_xdate(rotation=30)
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=120)
+    buf.seek(0)
+    plt.close(fig)
+
+    await update.message.reply_photo(buf, caption='Last 60 readings from the prototype coach.')
+
 def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('help', help_cmd))
     app.add_handler(CommandHandler('crowd', crowd))
     app.add_handler(CommandHandler('now', now))
+    app.add_handler(CommandHandler('whoami', whoami))
+    app.add_handler(CommandHandler('status', status))
+    app.add_handler(CommandHandler('stats', stats))
+    app.add_handler(CommandHandler('history', history))
     print('Bot running. Ctrl + C to kill. hehehehehe')
     init_db()
     start_receiver()
