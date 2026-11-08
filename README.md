@@ -42,7 +42,7 @@ python -m ipykernel install --user --name metro --display-name "metro venv"
 git clone https://github.com/Vonter/bmrcl-ridership-hourly data\bmrcl
 ```
 
-Create a `.env` file in the project root (never commit it):
+Create a `.env` file in the project root:
 
 ```
 TELEGRAM_TOKEN=your_token_from_botfather
