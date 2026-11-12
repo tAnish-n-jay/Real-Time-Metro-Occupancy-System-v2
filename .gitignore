@@ -2,3 +2,11 @@
 /venv
 PLAN.md
 /backup
+*.pt
+/test_images
+/testing
+/data/live.db
+/bot/backup
+/bot/bot_camera/*.py
+firmware/backup
+firmware/devkit_weight
