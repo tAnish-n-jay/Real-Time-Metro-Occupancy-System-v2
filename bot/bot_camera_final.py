@@ -205,7 +205,7 @@ def live_text() -> str:
     if LIVE['grams'] is None or time.time() - LIVE['ts'] > STALE_SECOND:
         return 'Prototype coach: offline (no recent reading).'
     pct    = max(0.0, min(1.0, LIVE['grams'] / FULL_G))
-    source = {'camera': '📷 camera', 'weight': '⚖️ weight sensor', 'combined': '🔀 combined'}.get(
+    source = {'camera': 'camera', 'weight': 'weight sensor', 'combined': 'combined'}.get(
         LIVE['source'], LIVE['source'])
     return (f"Prototype coach (live): {pct:.0%} ({level(pct)}) "
             f"| {LIVE['grams']:.0f}g | via {source}")
