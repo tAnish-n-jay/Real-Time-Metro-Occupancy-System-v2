@@ -44,17 +44,31 @@ _yolo_models = {
 }
 print('[YOLO] All models ready.')
 
-def pick_model(grams: float) -> tuple:
+def pick_model() -> tuple:
     """Pick YOLO model based on current weight sensor reading."""
-    pct = (grams / FULL_G) if grams else 0.0
-    if pct < 0.25:
-        return _yolo_models['nano'],   'YOLOv8n (Low crowd)'
-    elif pct < 0.50:
-        return _yolo_models['small'],  'YOLOv8s (Moderate crowd)'
-    elif pct < 0.75:
-        return _yolo_models['medium'], 'YOLOv8m (Crowded)'
+    sensor_online = (
+        LIVE['grams'] is not None and
+        time.time() - LIVE['ts'] <= STALE_SECOND
+    )
+
+    if not sensor_online:
+        key, path, name = 'medium', 'models/yolov8m.pt', 'YOLOv8m (sensor offline — default)'
     else:
-        return _yolo_models['large'],  'YOLOv8l (Very Crowded)'
+        pct = LIVE['grams'] / FULL_G
+        if pct < 0.25:
+            key, path, name = 'nano',   'models/yolov8n.pt', 'YOLOv8n (Low)'
+        elif pct < 0.50:
+            key, path, name = 'small',  'models/yolov8s.pt', 'YOLOv8s (Moderate)'
+        elif pct < 0.75:
+            key, path, name = 'medium', 'models/yolov8m.pt', 'YOLOv8m (Crowded)'
+        else:
+            key, path, name = 'large',  'models/yolov8l.pt', 'YOLOv8l (Very Crowded)'
+
+    if key not in _yolo_models:
+        print(f'[YOLO] Loading {name}...')
+        _yolo_models[key] = YOLO(path)
+
+    return _yolo_models[key], name
 
 with open('models/crowd_model.pkl', 'rb') as f:
     MODEL = pickle.load(f)
@@ -289,7 +303,10 @@ HELP = ("Commands:\n"
         "Admin only:\n"
         "/status  prototype health and DB info\n"
         "/stats   load summary by day type\n"
-        "/history chart of last 60 readings\n\n"
+        "/history chart of last 60 readings\n"
+        "/showdb show last N  readings in chat e.g. /showdb 20\n"
+        "/export download readings as CSV\n"
+        "/senddb download raw SQLite file\n\n"
         "Days: mon..sun, weekday, today, tomorrow\n"
         "Time: 9, 9am, 6pm, 23:00")
 
@@ -353,6 +370,31 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"{proto}\n\n{db}")
 
 @admin_only
+async def export_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    con  = sqlite3.connect(DB_PATH)
+    rows = con.execute(
+        "SELECT id, ts, grams, percent FROM readings ORDER BY ts DESC"
+    ).fetchall()
+    con.close()
+
+    if not rows:
+        await update.message.reply_text("No readings in DB yet.")
+        return
+    
+    import io
+    import csv
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(['id', 'timestamp', 'grams', 'percent'])
+    writer.writerows(rows)
+    buf.seek(0)
+
+    await update.message.reply_document(
+        document=buf.getvalue().encode(),
+        filename=f"readings_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        caption=f"{len(rows)} readings exported"
+    )
+@admin_only
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     con  = sqlite3.connect(DB_PATH)
     rows = con.execute("SELECT ts, grams, percent FROM readings ORDER BY ts").fetchall()
@@ -362,7 +404,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     import pandas as pd
     df = pd.DataFrame(rows, columns=['ts', 'grams', 'percent'])
-    df['ts']       = pd.to_datetime(df['ts'])
+    df['ts']       = pd.to_datetime(df['ts'], format='mixed')
     df['day_type'] = df['ts'].dt.day_of_week.apply(
         lambda d: "Weekday" if d < 5 else ("Saturday" if d == 5 else "Sunday"))
     summary = df.groupby("day_type").agg(
@@ -384,6 +426,42 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 @admin_only
+async def show_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    limit = 10
+    if context.args:
+        try:
+            limit = min(int(context.args[0]), 50)  
+        except ValueError:
+            pass
+
+    con  = sqlite3.connect(DB_PATH)
+    rows = con.execute(
+        f"SELECT ts, grams, percent FROM readings ORDER BY ts DESC LIMIT {limit}"
+    ).fetchall()
+    con.close()
+
+    if not rows:
+        await update.message.reply_text("No readings yet.")
+        return
+
+    lines = [f"Last {len(rows)} readings:\n"]
+    lines.append(f"{'Timestamp':<22} {'Grams':>7} {'Load':>6}")
+    lines.append('-' * 38)
+    for ts, grams, pct in rows:
+        lines.append(f"{ts:<22} {grams:>7.0f} {pct:>6.0%}")
+
+    await update.message.reply_text(
+        "```\n" + "\n".join(lines) + "\n```",
+        parse_mode="Markdown"
+    )
+@admin_only
+async def send_db_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_document(
+        document=open(DB_PATH, 'rb'),
+        filename='live.db',
+        caption='Raw SQLite database — open with DB Browser for SQLite'
+    )
+@admin_only
 async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     con  = sqlite3.connect(DB_PATH)
     rows = con.execute(
@@ -400,7 +478,7 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import io
 
     df = pd.DataFrame(rows[::-1], columns=["ts", "grams", "percent"])
-    df["ts"]  = pd.to_datetime(df["ts"])
+    df["ts"]  = pd.to_datetime(df["ts"], format='mixed')
     df["pct"] = df["percent"] * 100
 
     fig, ax = plt.subplots(figsize=(8, 3.5))
@@ -431,10 +509,8 @@ async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file = await context.bot.get_file(update.message.photo[-1].file_id)
     buf  = bytes(await file.download_as_bytearray())
 
-    grams = LIVE['grams'] or 0.0
-
     def run_yolo():
-        model, model_name = pick_model(grams)
+        model, model_name = pick_model()
         img     = Image.open(_io.BytesIO(buf)).convert('RGB')
         results = model(
             np.array(img),
@@ -459,33 +535,24 @@ async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         person_count, bag_count, annotated_img, model_name = await asyncio.to_thread(run_yolo)
+        pct = min(100, round(person_count / MAX_PERSONS * 100))
+        lbl = level(pct / 100)
 
-        # Fuse camera + weight sensor
-        occ = combined_occupancy(grams, person_count)
-        lbl = level(occ['combined_pct'])
-
-        # Weight sensor status line
         if LIVE['grams'] is None or time.time() - LIVE['ts'] > STALE_SECOND:
             weight_line = 'Weight sensor: offline'
         else:
-            weight_line = f"Weight sensor: {grams:.0f}g ({occ['weight_pct']:.0%})"
+            weight_pct  = max(0.0, min(1.0, LIVE['grams'] / FULL_G))
+            weight_line = f"Weight sensor: {LIVE['grams']:.0f}g ({weight_pct:.0%})"
 
         await update.message.reply_photo(
             photo=annotated_img,
             caption=(
                 f"Passengers: {person_count} detected\n"
                 f"Bags/Luggage: {bag_count} detected\n"
+                f"Load based on Camera: {pct}% ({lbl})\n"
                 f"{weight_line}\n"
-                f"Combined load: {occ['combined_pct']:.0%} ({lbl})\n"
-                f"Estimated count: {occ['estimated_count']} / {MAX_PERSONS}\n"
-                f"Model: {model_name}"
             )
         )
-
-        LIVE['grams']  = occ['combined_pct'] * FULL_G
-        LIVE['ts']     = time.time()
-        LIVE['source'] = 'combined' if grams > 50 else 'camera'
-        log_reading(LIVE['grams'])
 
     except Exception as e:
         await update.message.reply_text(f'Detection failed: {e}')
@@ -501,6 +568,9 @@ def main():
     app.add_handler(CommandHandler('stats',   stats))
     app.add_handler(CommandHandler('history', history))
     app.add_handler(CommandHandler('photo',   photo))
+    app.add_handler(CommandHandler('export', export_db))
+    app.add_handler(CommandHandler('showdb', show_db))
+    app.add_handler(CommandHandler('senddb',  send_db_file))
     app.add_handler(MessageHandler(tg_filters.PHOTO, photo))
     print('Bot running. Ctrl + C to kill. hehehehehe')
     init_db()
